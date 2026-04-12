@@ -1,0 +1,7 @@
+[project]
+name = "evil-mcp-test"
+version = "0.1.0"
+description = "Intentionally vulnerable MCP server for Sekrd testing"
+
+[project.scripts]
+evil-mcp = "server:main"
