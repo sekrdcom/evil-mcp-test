@@ -13,8 +13,69 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Sekrd Security Scan
-        uses: sekrdcom/sekrd@main
-        with:
-          url: 'https://github.com/sekrdcom/evil-mcp-test'
-          api-key: ${{ secrets.SEKRD_API_KEY }}
-          fail-on: 'critical'
+        env:
+          SEKRD_URL: 'https://github.com/sekrdcom/evil-mcp-test'
+          SEKRD_API_KEY: ${{ secrets.SEKRD_API_KEY }}
+          SEKRD_FAIL_ON: 'critical'
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.sekrd.com"
+          AUTH_HEADER="Authorization: Bearer $SEKRD_API_KEY"
+
+          echo "Submitting scan for $SEKRD_URL..."
+          RESPONSE=$(curl -s -X POST "$API_BASE/api/v1/scan/url" \
+            -H "Content-Type: application/json" \
+            -H "$AUTH_HEADER" \
+            -d "{\"url\":\"$SEKRD_URL\"}")
+          SCAN_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('scan_id',''))")
+
+          if [ -z "$SCAN_ID" ]; then
+            echo "::error::Failed to submit scan: $RESPONSE"
+            exit 1
+          fi
+          echo "Scan ID: $SCAN_ID"
+
+          # Poll for results (max 90s)
+          for i in $(seq 1 45); do
+            RESULT=$(curl -s "$API_BASE/api/v1/scans/$SCAN_ID" -H "$AUTH_HEADER")
+            STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))")
+            if [ "$STATUS" = "complete" ] || [ "$STATUS" = "failed" ]; then break; fi
+            echo "Status: $STATUS ($i/45)"
+            sleep 2
+          done
+
+          if [ "$STATUS" != "complete" ]; then
+            echo "::error::Scan did not complete (status: $STATUS)"
+            exit 1
+          fi
+
+          SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('score',0))")
+          VERDICT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('launch_verdict','SHIP'))")
+          FINDINGS=$(echo "$RESULT" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('findings',[]) or []))")
+
+          echo ""
+          echo "=========================="
+          echo "  Sekrd Security Scan"
+          echo "=========================="
+          echo "  Score:    $SCORE/100"
+          echo "  Verdict:  $VERDICT"
+          echo "  Findings: $FINDINGS"
+          echo "  Report:   https://sekrd.com/report/$SCAN_ID"
+          echo "=========================="
+
+          # Check for critical findings
+          HAS_CRITICAL=$(echo "$RESULT" | python3 -c "
+          import sys, json
+          findings = json.load(sys.stdin).get('findings', []) or []
+          print('yes' if any(f.get('severity') == 'critical' for f in findings) else 'no')
+          ")
+
+          if [ "$SEKRD_FAIL_ON" = "critical" ] && [ "$HAS_CRITICAL" = "yes" ]; then
+            echo "::error::Critical security issues found (fail-on: critical)"
+            exit 1
+          fi
+          if [ "$SEKRD_FAIL_ON" = "block" ] && [ "$VERDICT" = "BLOCK" ]; then
+            echo "::error::Security check failed (verdict: BLOCK)"
+            exit 1
+          fi
+          echo "Security check passed"
